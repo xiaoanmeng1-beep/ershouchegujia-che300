@@ -1,0 +1,12 @@
+node_modules/
+.npm-cache/
+dist/
+data/
+
+*.log
+*.sqlite-shm
+*.sqlite-wal
+
+.DS_Store
+Thumbs.db
+

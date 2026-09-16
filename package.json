@@ -1,0 +1,42 @@
+{
+  "name": "used-car-valuation",
+  "version": "0.2.0",
+  "private": true,
+  "description": "macOS used-car purchase price estimator",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:seed": "node scripts/build-seed.js",
+    "build:mac": "npm run build:seed && electron-builder --mac dir",
+    "build:win": "npm run build:seed && electron-builder --win dir --x64"
+  },
+  "devDependencies": {
+    "electron": "^38.1.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "cn.carvalue.desktop",
+    "productName": "二手车估价",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "data-store.js",
+      "portable-data.js",
+      "latest-request.js",
+      "embedded-login.js",
+      "auth-preload.js",
+      "preload.js",
+      "price-decoder.js",
+      "app/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": ["dir"]
+    },
+    "win": {
+      "target": ["dir"]
+    }
+  }
+}

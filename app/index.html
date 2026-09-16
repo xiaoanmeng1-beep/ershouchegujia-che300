@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>二手车估价</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="titlebar-drag-region" aria-hidden="true"></div>
+
+  <main class="app-shell">
+    <div class="valuation-column">
+    <section class="form-panel" aria-label="车辆信息">
+      <button class="form-row" id="vehicleField" type="button">
+        <span class="row-label">车型</span>
+        <span class="row-value placeholder" id="vehicleValue">请选择车型</span>
+        <span class="row-arrow" aria-hidden="true">›</span>
+      </button>
+
+      <button class="form-row" id="configurationField" type="button" disabled>
+        <span class="row-label">配置</span>
+        <span class="row-value placeholder" id="configurationValue">请先选择车型</span>
+        <span class="row-arrow" aria-hidden="true">›</span>
+      </button>
+
+      <div class="form-row split-row" id="registrationField">
+        <span class="row-label">选择年份</span>
+        <span class="split-controls date-controls">
+          <label class="date-control"><select id="registrationYearSelect" aria-label="上牌年份" disabled><option value="">年份</option></select><span>年</span></label>
+          <label class="date-control"><select id="registrationMonthSelect" aria-label="上牌月份" disabled><option value="">月份</option></select><span>月</span></label>
+        </span>
+      </div>
+
+      <div class="form-row split-row" id="locationField">
+        <span class="row-label">选择所在地</span>
+        <span class="split-controls location-controls">
+          <select id="provinceSelect" aria-label="省份或直辖市" disabled><option value="">省份</option></select>
+          <select id="citySelect" aria-label="城市" disabled><option value="">城市</option></select>
+        </span>
+      </div>
+
+      <label class="form-row" for="mileageInput">
+        <span class="row-label">输入公里数</span>
+        <span class="mileage-control">
+          <input class="row-input mileage-input" id="mileageInput" type="number" min="0" step="0.1" inputmode="decimal" placeholder="公里数" aria-label="输入行驶里程（万公里）">
+          <span class="unit">万公里</span>
+        </span>
+      </label>
+      <section class="form-row quote-summary quote-row" id="resultCard" aria-live="polite">
+        <span class="row-label">收车价区间</span>
+        <strong id="primaryPrice">--</strong>
+      </section>
+    </section>
+
+    <p class="form-message" id="formMessage" aria-live="polite"></p>
+    <p class="result-meta" id="resultBody" hidden></p>
+
+    <figure class="vehicle-photo-card" id="vehiclePhotoCard" hidden>
+      <div class="vehicle-photo-stage" id="vehiclePhotoStage">
+        <img id="vehiclePhoto" alt="车型参考图片" referrerpolicy="no-referrer" draggable="false" tabindex="0" title="拖动调整位置，双击恢复默认；方向键微调，Home 键复位">
+      </div>
+      <figcaption id="vehiclePhotoTitle"></figcaption>
+      <p id="vehiclePhotoNote">车型参考图，非实车照片</p>
+    </figure>
+    </div>
+    <div id="panelDivider" class="panel-divider" role="separator" aria-label="调整左右区域宽度" aria-orientation="vertical" tabindex="0"></div>
+    <aside class="account-column">
+      <h2>账号管理</h2>
+      <button class="login-button add-account-button" id="addAccount" type="button">添加账号</button>
+      <section class="login-panel" id="loginPanel" hidden aria-label="账号登录">
+        <header class="login-panel-header">
+          <span>账号登录</span>
+          <button class="login-button" id="closeLoginPanel" type="button">关闭</button>
+        </header>
+        <div class="login-panel-controls">
+          <p class="auth-notice" id="authNotice" aria-live="polite"></p>
+          <span class="login-panel-spinner" id="loginPanelSpinner" role="status" aria-label="加载登录页面"></span>
+          <button class="login-button" id="retryLoginPanel" type="button" hidden>重新加载</button>
+        </div>
+        <div class="login-panel-host" id="loginPanelHost" hidden aria-label="手机号及验证码登录"></div>
+      </section>
+      <div class="account-list" id="accountList" aria-label="账号列表"></div>
+      <p class="account-policy">账号独立登录，失效时自动尝试可用备用账号。</p>
+    <details class="diagnostics">
+    <summary>运行日志</summary>
+    <section class="log-panel">
+      <header class="log-header">
+        <span>运行日志</span>
+        <button id="clearLog" type="button">清空</button>
+      </header>
+      <pre class="log-output" id="logOutput" aria-live="polite"></pre>
+    </section>
+    </details>
+    </aside>
+  </main>
+
+  <dialog class="vehicle-dialog" id="vehicleDialog">
+    <form class="picker-dialog" method="dialog">
+      <header class="picker-header">
+        <h2>选择车型</h2>
+        <button class="close-button" type="submit" value="cancel" aria-label="关闭">×</button>
+      </header>
+
+      <div class="picker-columns vehicle-series-columns">
+        <section class="picker-column brand-column">
+          <h3>品牌</h3>
+          <div class="brand-browser">
+            <nav class="letter-index" id="brandIndex" aria-label="品牌首字母索引"></nav>
+            <div class="picker-list brand-list" id="brandList"></div>
+          </div>
+        </section>
+
+        <section class="picker-column">
+          <h3>车系</h3>
+          <div class="picker-list" id="seriesList"></div>
+        </section>
+
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="vehicle-dialog" id="configurationDialog">
+    <form class="picker-dialog" method="dialog">
+      <header class="picker-header">
+        <h2>选择配置</h2>
+        <button class="close-button" type="submit" value="cancel" aria-label="关闭">×</button>
+      </header>
+      <div class="picker-list" id="trimList"></div>
+    </form>
+  </dialog>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>
