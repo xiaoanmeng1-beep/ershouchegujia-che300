@@ -167,6 +167,17 @@ class DataStore {
     try { return JSON.parse(row.payload); } catch { return null; }
   }
 
+  getLatestQuoteForModel(modelId) {
+    const row = this.db.prepare(`
+      SELECT cache_key, payload FROM quotes
+      WHERE cache_key LIKE ?
+      ORDER BY fetched_at DESC
+      LIMIT 1
+    `).get(`%:%:${modelId}:%`);
+    if (!row) return null;
+    try { return { key: row.cache_key, quote: JSON.parse(row.payload) }; } catch { return null; }
+  }
+
   saveQuote(key, quote) {
     this.db.prepare(`
       INSERT INTO quotes(cache_key, payload, fetched_at) VALUES (?, ?, ?)

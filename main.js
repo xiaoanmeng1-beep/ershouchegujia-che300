@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, session, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, session, dialog, safeStorage } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { decodePriceImage, selfTest } = require('./price-decoder');
@@ -6,6 +6,12 @@ const { DataStore } = require('./data-store');
 const { resolveDataDirectory, initializePortableDatabase } = require('./portable-data');
 const { LatestRequest } = require('./latest-request');
 const { EmbeddedLogin } = require('./embedded-login');
+
+// Windows may freeze fully hidden Chromium windows even when page throttling is disabled.
+// Catalog and quote extraction depend on those windows continuing to render and execute JS.
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+
 const quoteRequests = new LatestRequest();
 const idleQuoteWindows = new Map();
 
@@ -20,7 +26,7 @@ const CATEGORY_INDEX = {
   energy: 'green-car',
   commercial: 'commercial-car'
 };
-const CACHE_TTL = 7 * 24 * 60 * 60 * 1000;
+const CACHE_TTL = 3 * 24 * 60 * 60 * 1000;
 const CATALOG_TTL = CACHE_TTL;
 
 let mainWindow;
@@ -33,6 +39,7 @@ let sessionVerified = false;
 let loginReachedLoginPage = false;
 let loginSyncRecoveryAttempted = false;
 let loginLastSyncPhase = '';
+let loginPhoneMask = '';
 let workerWindow;
 let workerCategory = '';
 let workerBrandId = '';
@@ -127,6 +134,11 @@ function createMainWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'app', 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.webContents.once('did-finish-load', () => {
+    publishAccounts();
+    verifyStartupAccounts().catch(error => emitLog('启动验证失败', { message: error.message }));
+  });
+  return mainWindow;
 }
 
 function normalizeChe300Target(targetUrl) {
@@ -286,19 +298,102 @@ function reportAuthState(phase) {
   }
 }
 
+function sessionSnapshotFile() {
+  return path.join(app.getPath('userData'), 'account-sessions.bin');
+}
+
+function readSessionSnapshots() {
+  try {
+    if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(sessionSnapshotFile())) return {};
+    return JSON.parse(safeStorage.decryptString(fs.readFileSync(sessionSnapshotFile())));
+  } catch (error) {
+    emitLog('读取本机登录状态失败', { message: error.message });
+    return {};
+  }
+}
+
+function writeSessionSnapshots(snapshots) {
+  if (!safeStorage.isEncryptionAvailable()) return;
+  fs.mkdirSync(path.dirname(sessionSnapshotFile()), { recursive: true });
+  fs.writeFileSync(sessionSnapshotFile(), safeStorage.encryptString(JSON.stringify(snapshots)));
+}
+
+function cookieSetDetails(cookie) {
+  const host = String(cookie.domain || '').replace(/^\./, '');
+  const cookiePath = cookie.path || '/';
+  const details = {
+    url: `${cookie.secure ? 'https' : 'http'}://${host}${cookiePath}`,
+    name: cookie.name,
+    value: cookie.value,
+    path: cookiePath,
+    secure: Boolean(cookie.secure),
+    httpOnly: Boolean(cookie.httpOnly),
+    sameSite: cookie.sameSite || 'unspecified'
+  };
+  if (!cookie.hostOnly && !cookie.name.startsWith('__Host-')) details.domain = cookie.domain;
+  if (!cookie.session && Number.isFinite(cookie.expirationDate)) details.expirationDate = cookie.expirationDate;
+  return details;
+}
+
+async function saveAccountSession(accountId, partition) {
+  const cookies = await session.fromPartition(partition).cookies.get({});
+  const snapshots = readSessionSnapshots();
+  snapshots[accountId] = cookies.filter(cookie => /(^|\.)che300\.com$/i.test(cookie.domain));
+  writeSessionSnapshots(snapshots);
+}
+
+async function restoreAccountSessions() {
+  const snapshots = readSessionSnapshots();
+  for (const account of accounts) {
+    const saved = snapshots[account.id];
+    if (!Array.isArray(saved) || !saved.length) continue;
+    const accountCookies = session.fromPartition(account.partition).cookies;
+    for (const cookie of saved) {
+      try { await accountCookies.set(cookieSetDetails(cookie)); }
+      catch (error) { emitLog('恢复部分登录状态失败', { account: account.label, message: error.message }); }
+    }
+    await accountCookies.flushStore();
+  }
+}
+
+function removeAccountSessionSnapshot(accountId) {
+  const snapshots = readSessionSnapshots();
+  if (!Object.hasOwn(snapshots, accountId)) return;
+  delete snapshots[accountId];
+  writeSessionSnapshots(snapshots);
+}
+
 async function completeLogin(reason, url) {
   if (loginAuthenticated) return true;
   loginAuthenticated = true;
   emitLog('登录状态已确认', { reason, url });
   sessionVerified = true;
   try {
-    await session.fromPartition(CHE300_PARTITION).cookies.flushStore();
+    const accountSession = session.fromPartition(CHE300_PARTITION);
+    await saveAccountSession(currentAccountId, CHE300_PARTITION);
+    await accountSession.cookies.flushStore();
   } catch (error) {
     emitLog('登录可用于本次查询，但保存会话失败', { message: error.message });
+  }
+  const account = accounts.find(item => item.id === currentAccountId);
+  if (account && loginPhoneMask && account.phoneMask !== loginPhoneMask) {
+    account.phoneMask = loginPhoneMask;
+    dataStore.db.prepare('UPDATE service_accounts SET phone_mask = ? WHERE id = ?')
+      .run(loginPhoneMask, account.id);
   }
   reportAuthState('authenticated');
   if (loginWindow && !loginWindow.isDestroyed()) loginWindow.close();
   return true;
+}
+
+async function hasSyncedLoginCookie() {
+  try {
+    const cookies = await session.fromPartition(CHE300_PARTITION).cookies.get({ name: 'login_st' });
+    const now = Date.now() / 1000;
+    return cookies.some(cookie => Boolean(cookie.value) && (!cookie.expirationDate || cookie.expirationDate > now));
+  } catch {
+    return false;
+  }
 }
 
 async function checkLoginWindow() {
@@ -307,6 +402,9 @@ async function checkLoginWindow() {
   if (state.syncPhase && state.syncPhase !== loginLastSyncPhase) {
     loginLastSyncPhase = state.syncPhase;
     emitLog('官方登录会话同步', { phase: state.syncPhase, error: state.syncError });
+  }
+  if (state.syncPhase === 'synced' && !state.syncError && await hasSyncedLoginCookie()) {
+    return completeLogin('登录会话同步完成', state.url);
   }
   let hostname = '';
   try {
@@ -340,6 +438,7 @@ async function openChe300Login(targetUrl) {
   loginReachedLoginPage = false;
   loginSyncRecoveryAttempted = false;
   loginLastSyncPhase = '';
+  loginPhoneMask = '';
   sessionVerified = false;
   reportAuthState('login-required');
   loginCompletion = new Promise((resolve) => {
@@ -367,7 +466,7 @@ async function openChe300Login(targetUrl) {
     }
   });
 
-  loginWindow.webContents.on('did-navigate', (_event, url) => {
+  loginWindow.webContents.on('did-navigate', async (_event, url) => {
     try {
       const hostname = new URL(url).hostname;
       if (hostname === 'login.che300.com') {
@@ -375,7 +474,11 @@ async function openChe300Login(targetUrl) {
         return;
       }
       if (loginReachedLoginPage && hostname === 'www.che300.com') {
-        emitLog('登录页已回跳官网，等待页面确认登录状态', { url });
+        if (await hasSyncedLoginCookie()) {
+          await completeLogin('登录页回跳且会话已同步', url);
+          return;
+        }
+        emitLog('登录页已回跳官网，等待会话同步完成', { url });
       }
     } catch (error) {
       emitLog('读取登录跳转地址失败', { message: error.message });
@@ -421,7 +524,7 @@ async function openChe300Login(targetUrl) {
   return loginCompletion;
 }
 
-async function withPageTimeout(target, task, timeout = 8000) {
+async function withPageTimeout(target, task, timeout = 20000, destroyOnTimeout = true) {
   let timer;
   try {
     return await Promise.race([
@@ -431,15 +534,17 @@ async function withPageTimeout(target, task, timeout = 8000) {
           const error = new Error('数据服务响应超时');
           error.code = 'REQUEST_TIMEOUT';
           reject(error);
-          if (target === workerWindow) discardWorkerWindow();
-          else if (target && target !== loginWindow && !target.isDestroyed()) target.destroy();
+          if (destroyOnTimeout) {
+            if (target === workerWindow) discardWorkerWindow();
+            else if (target && target !== loginWindow && !target.isDestroyed()) target.destroy();
+          }
         }, Math.max(1, timeout));
       })
     ]);
   } finally { clearTimeout(timer); }
 }
 
-function evaluatePage(target, source, timeout = 8000) {
+function evaluatePage(target, source, timeout = 20000, destroyOnTimeout = true) {
   const execute = () => {
     if (!target || target.isDestroyed() || target.webContents.isDestroyed()) {
       const error = new Error('后台页面已关闭');
@@ -449,7 +554,7 @@ function evaluatePage(target, source, timeout = 8000) {
     return target.webContents.executeJavaScript(source);
   };
   if (target === loginWindow) return Promise.resolve().then(execute);
-  return withPageTimeout(target, execute, timeout);
+  return withPageTimeout(target, execute, timeout, destroyOnTimeout);
 }
 
 async function loadChe300Page(browserWindow, url, timeout = 12000) {
@@ -484,6 +589,7 @@ async function getWorkerWindow() {
     webPreferences: {
       partition: CHE300_PARTITION,
       backgroundThrottling: false,
+      paintWhenInitiallyHidden: true,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -509,9 +615,10 @@ async function getQuoteWindow(scope) {
     }
   }
   const quoteWindow = scope.attach(new BrowserWindow({
-    width: 1000, height: 760, show: false,
+    width: 1440, height: 1200, show: false,
     webPreferences: {
       partition: CHE300_PARTITION, backgroundThrottling: false,
+      paintWhenInitiallyHidden: true,
       contextIsolation: true, nodeIntegration: false, sandbox: true
     }
   }));
@@ -554,9 +661,65 @@ function retainQuoteWindow(scope) {
 async function waitForPageCondition(window, expression, timeout = 8000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeout) {
-    if (await evaluatePage(window, `Boolean(${expression})`, Math.min(8000, timeout - (Date.now() - startedAt)))) return;
+    if (await evaluatePage(window, `Boolean(${expression})`, Math.min(20000, timeout - (Date.now() - startedAt)))) return;
     await sleep(150);
   }
+  throw new Error('等待数据服务响应超时');
+}
+
+function pageHostname(window) {
+  try { return new URL(window.webContents.getURL()).hostname; }
+  catch { return ''; }
+}
+
+async function waitForQuoteOrLogin(window, timeout = 30000) {
+  const startedAt = Date.now();
+  let refreshed = false;
+  let lastWakeAt = 0;
+  const quoteSelector = `document.querySelector(
+    '[class*=low_buy_price] img, img[class*=low_buy_price], [class*=low_buy_price][style*=background], [class*=price] canvas'
+  )`;
+  while (Date.now() - startedAt < timeout) {
+    if (pageHostname(window) === 'login.che300.com') return 'login';
+    try {
+      const phase = await evaluatePage(window, `(() => {
+        const text = document.body?.innerText || '';
+        if (text.includes('当前账号估值频繁') && text.includes('1小时')) return 'rate-limited';
+        return Boolean(${quoteSelector}) ? 'quote' : '';
+      })()`, 1500, false);
+      if (phase) return phase;
+    } catch (error) {
+      if (error.code !== 'REQUEST_TIMEOUT') throw error;
+    }
+    const elapsed = Date.now() - startedAt;
+    if (elapsed - lastWakeAt > 1000) {
+      lastWakeAt = elapsed;
+      try {
+        await evaluatePage(window, `(() => {
+          const visible = (node) => node && node.getClientRects().length > 0;
+          const goodTab = [...document.querySelectorAll('button, a, li, div, span')]
+            .find((node) => visible(node) && node.textContent.trim() === '车况良好');
+          goodTab?.click();
+          document.querySelectorAll('img[loading=lazy]').forEach((image) => { image.loading = 'eager'; });
+          const target = document.querySelector('[class*=low_buy_price], [class*=individual_low_sold_price], [class*=price]');
+          if (target) target.scrollIntoView({ block: 'center', inline: 'center' });
+          else window.scrollTo(0, Math.max(0, document.documentElement.scrollHeight * 0.55));
+          window.dispatchEvent(new Event('resize'));
+          window.dispatchEvent(new Event('scroll'));
+          return true;
+        })()`, 3000, false);
+      } catch {}
+    }
+    if (!refreshed && elapsed > 12000) {
+      refreshed = true;
+      try {
+        window.webContents.reloadIgnoringCache();
+        await waitForPageCondition(window, "document.readyState === 'complete'", 8000);
+      } catch {}
+    }
+    await sleep(180);
+  }
+  if (pageHostname(window) === 'login.che300.com') return 'login';
   throw new Error('等待数据服务响应超时');
 }
 
@@ -929,7 +1092,8 @@ async function estimateVehicle(input, scope) {
   const key = [provinceId, cityId, modelId, registrationText, mileageText].join(':');
   const cached = dataStore.getQuote(key);
   emitLog('估值参数已整理', { provinceId, cityId, modelId, registration: registrationText, mileage: mileageText });
-  if (cached && cached.vehicle && Date.now() - cached.fetchedAt < CACHE_TTL) {
+  if (!input.forceRefresh && cached && cached.vehicle && cached.priceRuleVersion === 6 && cached.prices?.good?.high
+    && Date.now() - cached.fetchedAt < CACHE_TTL) {
     emitLog('命中本地报价缓存');
     return { ok: true, cached: true, ...cached };
   }
@@ -940,18 +1104,27 @@ async function estimateVehicle(input, scope) {
   const windowReadyMs = Date.now() - quoteStartedAt;
   emitLog('加载车300报价页', { url });
   recordAccountRequest();
-  await scope.wait(() => loadChe300Page(window, url));
+  await scope.wait(() => loadChe300Page(window, url, 20000));
   const documentReadyMs = Date.now() - quoteStartedAt;
 
   try {
-    await scope.wait(() => waitForPageCondition(window, "location.hostname === 'login.che300.com' || document.querySelector('[class*=excellent_low_buy_price] img, img[class*=excellent_low_buy_price]')", 15000));
-    if (new URL(window.webContents.getURL()).hostname === 'login.che300.com') {
+    const pagePhase = await scope.wait(() => waitForQuoteOrLogin(window, 30000));
+    if (pagePhase === 'rate-limited') {
+      emitLog('当前账号触发估值频率限制');
+      return { ok: false, code: 'RATE_LIMITED', message: '当前账号暂时不可估值' };
+    }
+    if (pagePhase === 'login') {
       sessionVerified = false;
       emitLog('报价请求需要登录，保留查询参数');
       return { ok: false, code: 'AUTH_REQUIRED', message: '需要登录数据服务', url, targetUrl: url };
     }
   } catch (error) {
     scope.check();
+    if (!window.isDestroyed() && !window.webContents.isDestroyed() && pageHostname(window) === 'login.che300.com') {
+      sessionVerified = false;
+      emitLog('报价页已进入登录入口，不再重试报价');
+      return { ok: false, code: 'AUTH_REQUIRED', message: '需要登录数据服务', url, targetUrl: url };
+    }
     if (error.code === 'REQUEST_TIMEOUT' || error.code === 'PAGE_CLOSED'
       || window.isDestroyed() || window.webContents.isDestroyed()) {
       emitLog('后台报价页面不可继续读取，结束本次尝试', {
@@ -963,6 +1136,7 @@ async function estimateVehicle(input, scope) {
       url: location.href,
       hostname: location.hostname,
       hasLogout: document.body.innerText.includes('退出'),
+      rateLimited: document.body.innerText.includes('当前账号估值频繁') && document.body.innerText.includes('1小时'),
       hasPhoneInput: [...document.querySelectorAll('input')].some((node) => node.getClientRects().length && (node.placeholder || '').includes('手机号')),
       dataImageCount: [...document.images].filter((image) => image.src.startsWith('data:image')).length,
       text: document.body.innerText.slice(0, 500)
@@ -972,6 +1146,10 @@ async function estimateVehicle(input, scope) {
       sessionVerified = false;
       emitLog('报价页要求登录', { url: pageState.url, hasPhoneInput: pageState.hasPhoneInput });
       return { ok: false, code: 'AUTH_REQUIRED', message: '需要登录数据服务', url, targetUrl: url };
+    }
+    if (pageState.rateLimited) {
+      emitLog('当前账号触发估值频率限制');
+      return { ok: false, code: 'RATE_LIMITED', message: '当前账号暂时不可估值' };
     }
     emitLog('报价页已打开，但未找到报价图片', {
       url: pageState.url,
@@ -983,43 +1161,130 @@ async function estimateVehicle(input, scope) {
 
   const images = await scope.wait(() => evaluatePage(window, `
     (() => {
-      const source = (prefix) => {
-        const roots = [...document.querySelectorAll('[class*=' + prefix + ']')];
-        for (const root of roots) {
-          const image = root.matches('img') ? root : root.querySelector('img');
-          if (image?.src) return image.src;
+      const pngFrom = (node) => {
+        if (!node) return '';
+        const candidates = [];
+        if (node.matches?.('img')) candidates.push(node.currentSrc, node.src);
+        for (const attribute of [...(node.attributes || [])]) candidates.push(attribute.value);
+        const background = getComputedStyle(node).backgroundImage || '';
+        const backgroundMatch = background.match(/url\\(["']?(data:image\\/png[^"')]+)["']?\\)/i);
+        if (backgroundMatch) candidates.push(backgroundMatch[1]);
+        return candidates.find((value) => typeof value === 'string' && value.startsWith('data:image/png')) || '';
+      };
+      const sourceFromRoot = (root) => {
+        const own = pngFrom(root);
+        if (own) return own;
+        for (const child of root.querySelectorAll?.('img, [style*=background]') || []) {
+          const source = pngFrom(child);
+          if (source) return source;
         }
         return '';
       };
+      const source = (prefix) => {
+        const roots = [...document.querySelectorAll('[class*=' + prefix + ']')];
+        for (const root of roots) {
+          const value = sourceFromRoot(root);
+          if (value) return value;
+        }
+        return '';
+      };
+      const goodPriceImages = [...document.querySelectorAll('[class*=good][class*=price], [class*=good] [class*=price]')]
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          return { src: sourceFromRoot(node), left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+        })
+        .filter((item, index, all) => item.src && item.width > 0 && item.height > 0
+          && all.findIndex((other) => other.src === item.src && Math.abs(other.left - item.left) < 2
+            && Math.abs(other.top - item.top) < 2) === index);
+
+      const rows = [];
+      for (const item of goodPriceImages) {
+        let row = rows.find((candidate) => Math.abs(candidate.top - item.top) < 8);
+        if (!row) {
+          row = { top: item.top, items: [] };
+          rows.push(row);
+        }
+        row.items.push(item);
+      }
+      const boundaryRow = rows.filter((row) => row.items.length >= 4)
+        .sort((left, right) => right.top - left.top)[0];
+      const boundaries = boundaryRow
+        ? boundaryRow.items.sort((left, right) => left.left - right.left)
+        : [];
       return {
         excellentLow: source('excellent_low_buy_price'),
-        excellentHigh: source('excellent_individual_low_sold_price'),
         goodLow: source('good_low_buy_price'),
-        goodHigh: source('good_individual_low_sold_price'),
+        goodBoundaryLow: boundaries[0]?.src || '',
+        goodBoundaryHigh: boundaries[2]?.src || '',
+        goodFallbackHigh: source('good_individual_low_sold_price'),
+        goodBoundaryCount: boundaries.length,
         normalLow: source('normal_low_buy_price'),
-        normalHigh: source('normal_individual_low_sold_price')
       };
     })()
   `));
-  emitLog('已获取报价图片', Object.fromEntries(Object.entries(images).map(([name, source]) => [name, Boolean(source)])));
+  emitLog('已获取报价图片', {
+    excellentLow: Boolean(images.excellentLow),
+    goodLow: Boolean(images.goodLow),
+    normalLow: Boolean(images.normalLow),
+    goodBoundaryLow: Boolean(images.goodBoundaryLow),
+    goodBoundaryHigh: Boolean(images.goodBoundaryHigh),
+    goodFallbackHigh: Boolean(images.goodFallbackHigh),
+    goodBoundaryCount: images.goodBoundaryCount
+  });
   emitLog('报价加载分段耗时', {
     windowReadyMs, documentReadyMs,
     imageWaitAfterDocumentMs: Date.now() - quoteStartedAt - documentReadyMs,
     totalUntilImagesMs: Date.now() - quoteStartedAt
   });
 
+  const decodeAvailablePrice = (name, source) => {
+    if (!source) return null;
+    try {
+      const value = decodePriceImage(source).value;
+      return Number.isFinite(value) ? value : null;
+    } catch (error) {
+      emitLog('报价图片解析失败，改用备用价格', { field: name, message: error.message });
+      return null;
+    }
+  };
+  const decodedPrices = {
+    excellentLow: decodeAvailablePrice('excellentLow', images.excellentLow),
+    goodLow: decodeAvailablePrice('goodLow', images.goodLow),
+    goodBoundaryLow: decodeAvailablePrice('goodBoundaryLow', images.goodBoundaryLow),
+    goodBoundaryHigh: decodeAvailablePrice('goodBoundaryHigh', images.goodBoundaryHigh),
+    goodFallbackHigh: decodeAvailablePrice('goodFallbackHigh', images.goodFallbackHigh),
+    normalLow: decodeAvailablePrice('normalLow', images.normalLow)
+  };
+  const purchaseLow = decodedPrices.goodBoundaryLow
+    ?? decodedPrices.goodLow
+    ?? [decodedPrices.normalLow, decodedPrices.excellentLow].find(Number.isFinite);
+  const highCandidates = [
+    decodedPrices.goodBoundaryHigh,
+    decodedPrices.goodFallbackHigh,
+    decodedPrices.excellentLow,
+    decodedPrices.normalLow
+  ].filter((value) => Number.isFinite(value) && value > purchaseLow);
+  const purchaseHigh = highCandidates[0] ?? purchaseLow;
+  emitLog('报价价格已整理', {
+    low: purchaseLow,
+    high: purchaseHigh,
+    usedFallback: !Number.isFinite(decodedPrices.goodBoundaryHigh)
+  });
+
   const result = {
     url,
     fetchedAt: Date.now(),
+    priceRuleVersion: 6,
     prices: {
       excellent: {
-        low: decodePriceImage(images.excellentLow).value
+        low: decodedPrices.excellentLow ?? purchaseLow
       },
       good: {
-        low: decodePriceImage(images.goodLow).value
+        low: purchaseLow,
+        high: purchaseHigh
       },
       normal: {
-        low: decodePriceImage(images.normalLow).value
+        low: decodedPrices.normalLow ?? purchaseLow
       }
     }
   };
@@ -1049,6 +1314,18 @@ async function estimateWithLogin(input, scope) {
     const login = await scope.wait(() => loginCompletion);
     if (!login?.authenticated) return { ok: false, code: 'LOGIN_CANCELLED' };
   }
+  const activeAccount = accounts.find(account => account.id === currentAccountId && !account.deleting);
+  const activeCookies = await scope.wait(() => session.fromPartition(activeAccount.partition).cookies.get({ url: 'https://www.che300.com/' }));
+  activeAccount.hasSession = activeCookies.length > 0;
+  if (!activeAccount.hasSession || activeAccount.status !== 'authenticated') {
+    sessionVerified = false;
+    if (!activeAccount.hasSession) activeAccount.status = 'signed-out';
+    activeAccount.checkedAt = 0;
+    publishAccounts();
+    emitLog('当前账号登录状态未确认，直接展开登录入口', { status: activeAccount.status });
+    const login = await scope.wait(() => openChe300Login());
+    if (!login?.authenticated) return { ok: false, code: 'LOGIN_CANCELLED' };
+  }
   reportAuthState('querying');
   const attempted = new Set();
   while (true) {
@@ -1066,6 +1343,19 @@ async function estimateWithLogin(input, scope) {
     if (result.ok) {
       if (!result.cached) scheduleAccountMaintenance(accountId);
       return result;
+    }
+    if (result.code === 'RATE_LIMITED') {
+      markAccountRateLimited(accountId);
+      attempted.add(accountId);
+      const backup = await scope.wait(() => findReadyBackup(attempted));
+      if (backup) {
+        activateAccount(backup.id, true);
+        scope.dispose();
+        emitLog('当前账号进入冷却，切换备用账号继续估价', { account: backup.label });
+        reportAuthState('querying');
+        continue;
+      }
+      return cachedQuoteForInput(input) || result;
     }
     if (result.code !== 'AUTH_REQUIRED') {
       scheduleAccountMaintenance(accountId);
@@ -1108,6 +1398,7 @@ async function estimateWithRetry(input, scope) {
     scope.check();
     try {
       const result = await estimateVehicle(input, scope);
+      if (result.code === 'RATE_LIMITED') return result;
       if (result.ok || result.code === 'AUTH_REQUIRED' || attempt === 1) return result;
       emitLog('估价请求未返回报价，重试一次', { code: result.code });
     } catch (error) {
@@ -1124,16 +1415,12 @@ function submitEstimate(input) {
   const scope = quoteRequests.start();
   const requestedAt = Date.now();
   const cached = cachedQuoteForInput(input, false);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
-    emitLog('命中有效报价缓存，直接展示');
-    quoteRequests.finish(scope);
-    return Promise.resolve({ ...cached, requestId: scope.id });
-  }
+  const onlineInput = cached ? { ...input, forceRefresh: true } : input;
   const task = serializeBrowserWork(async () => {
     try {
       scope.check();
       emitLog('开始最新估价请求', { requestId: scope.id, queueMs: Date.now() - requestedAt });
-      const result = await scope.wait(() => estimateWithLogin(input, scope));
+      const result = await scope.wait(() => estimateWithLogin(onlineInput, scope));
       return { ...result, requestId: scope.id };
     } catch (error) {
       if (scope.cancelled || error.code === 'SUPERSEDED') {
@@ -1148,7 +1435,7 @@ function submitEstimate(input) {
     }
   });
   if (!cached) return task;
-  emitLog('先展示已有报价，后台更新');
+  emitLog('先展示已有报价，后台强制更新', { ageMs: Date.now() - cached.fetchedAt });
   task.then(result => {
     if (!scope.cancelled && result.ok && !result.cached && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('che300:quote-updated', {
@@ -1160,25 +1447,69 @@ function submitEstimate(input) {
   return Promise.resolve({ ...cached, requestId: scope.id, refreshing: true });
 }
 
+function normalizeCachedQuote(cached) {
+  if (!cached?.prices) return null;
+  const values = [
+    cached.prices?.good?.low,
+    cached.prices?.good?.high,
+    cached.prices?.excellent?.low,
+    cached.prices?.normal?.low
+  ].filter(Number.isFinite);
+  if (!values.length) return null;
+  const low = Number.isFinite(cached.prices?.good?.low)
+    ? cached.prices.good.low
+    : Math.min(...values);
+  const high = Number.isFinite(cached.prices?.good?.high) && cached.prices.good.high > low
+    ? cached.prices.good.high
+    : values.filter((value) => value > low).sort((left, right) => left - right)[0];
+  if (!Number.isFinite(high)) return null;
+  return {
+    ...cached,
+    priceRuleVersion: 6,
+    prices: {
+      excellent: { low: cached.prices?.excellent?.low ?? high },
+      good: { low, high },
+      normal: { low: cached.prices?.normal?.low ?? low }
+    }
+  };
+}
+
 function cachedQuoteForInput(input, logFallback = true) {
   const date = String(input.registration || '').match(/^(\d{4})-(\d{1,2})$/);
   const mileage = Number(input.mileage);
   if (!date || Number(date[2]) < 1 || Number(date[2]) > 12 || !Number.isFinite(mileage) || mileage <= 0 || mileage > 100
       || ![input.provinceId, input.cityId, input.modelId].every(id => /^\d+$/.test(String(id)))) return null;
   const key = [input.provinceId, input.cityId, input.modelId, date[1] + '-' + Number(date[2]), String(mileage)].join(':');
-  const cached = dataStore.getQuote(key);
-  if (!cached?.prices) return null;
-  cached.vehicle = upgradeCachedVehiclePhoto(key, cached.vehicle, JSON.stringify(input));
-  if (logFallback) emitLog('在线报价暂不可用，使用已有数据库报价');
-  return { ...cached, ok: true, cached: true };
+  let cacheKey = key;
+  let cached = normalizeCachedQuote(dataStore.getQuote(key));
+  let nearest = false;
+  if (!cached && logFallback) {
+    const historical = dataStore.getLatestQuoteForModel(String(input.modelId));
+    if (historical) {
+      cacheKey = historical.key;
+      cached = normalizeCachedQuote(historical.quote);
+      nearest = Boolean(cached);
+    }
+  }
+  if (!cached) return null;
+  cached.vehicle = upgradeCachedVehiclePhoto(cacheKey, cached.vehicle, JSON.stringify(input));
+  if (logFallback) emitLog(nearest ? '在线报价暂不可用，使用同车型历史报价' : '在线报价暂不可用，使用已有数据库报价');
+  return { ...cached, ok: true, cached: true, historicalFallback: nearest };
 }
 
 function initializeAccounts() {
   dataStore.db.exec(`CREATE TABLE IF NOT EXISTS service_accounts (
     id TEXT PRIMARY KEY, label TEXT NOT NULL, partition TEXT NOT NULL UNIQUE,
     request_count INTEGER NOT NULL DEFAULT 0, total_requests INTEGER NOT NULL DEFAULT 0,
-    active INTEGER NOT NULL DEFAULT 0
+    active INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0
   )`);
+  const accountColumns = dataStore.db.prepare('PRAGMA table_info(service_accounts)').all();
+  if (!accountColumns.some(column => column.name === 'cooldown_until')) {
+    dataStore.db.exec('ALTER TABLE service_accounts ADD COLUMN cooldown_until INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!accountColumns.some(column => column.name === 'phone_mask')) {
+    dataStore.db.exec("ALTER TABLE service_accounts ADD COLUMN phone_mask TEXT NOT NULL DEFAULT ''");
+  }
   if (!dataStore.timestamp('service-accounts:initialized')) {
     dataStore.transaction(() => {
       if (!dataStore.db.prepare('SELECT id FROM service_accounts LIMIT 1').get()) {
@@ -1190,8 +1521,11 @@ function initializeAccounts() {
   }
   accounts = dataStore.db.prepare('SELECT * FROM service_accounts ORDER BY rowid').all().map(row => ({
     id: row.id, label: row.label, partition: row.partition,
+    phoneMask: row.phone_mask || '',
     requests: row.request_count, totalRequests: row.total_requests, active: Boolean(row.active),
-    status: 'unchecked', checkedAt: 0, lastCheckAt: 0, hasSession: false, maintenanceQueued: false
+    cooldownUntil: Number(row.cooldown_until) || 0,
+    status: Number(row.cooldown_until) > Date.now() ? 'cooldown' : 'unchecked',
+    checkedAt: 0, lastCheckAt: 0, hasSession: false, maintenanceQueued: false
   }));
   const active = accounts.find(account => account.active) || accounts[0];
   currentAccountId = active?.id || '';
@@ -1199,10 +1533,19 @@ function initializeAccounts() {
 }
 
 function accountSnapshot() {
+  for (const account of accounts) {
+    if (account.cooldownUntil && account.cooldownUntil <= Date.now()) {
+      account.cooldownUntil = 0;
+      if (account.status === 'cooldown') account.status = 'unchecked';
+      dataStore.db.prepare('UPDATE service_accounts SET cooldown_until = 0 WHERE id = ?').run(account.id);
+    }
+  }
   return accounts.map(account => ({
     id: account.id, label: account.label, active: account.id === currentAccountId,
+    phoneMask: account.phoneMask || '',
     requests: account.requests, totalRequests: account.totalRequests,
-    status: account.status, hasSession: account.hasSession, loginInProgress: Boolean(account.loginInProgress)
+    status: account.status, cooldownUntil: account.cooldownUntil || 0,
+    hasSession: account.hasSession, loginInProgress: Boolean(account.loginInProgress)
   }));
 }
 
@@ -1215,6 +1558,7 @@ async function listAccounts() {
     const cookies = await session.fromPartition(account.partition).cookies.get({ url: 'https://www.che300.com/' });
     account.hasSession = cookies.length > 0;
     if (!account.hasSession && account.status === 'unchecked') account.status = 'signed-out';
+    else if (account.hasSession && account.status === 'unchecked') account.status = 'checking';
   }
   return accountSnapshot();
 }
@@ -1238,6 +1582,7 @@ function addAccount() {
   const id = require('node:crypto').randomUUID();
   const account = {
     id, label: '账号 ' + (Math.max(0, ...accounts.map(item => Number(item.label.match(/\d+$/)?.[0]) || 0)) + 1), partition: 'persist:che300-account-' + id,
+    phoneMask: '',
     requests: 0, totalRequests: 0, status: 'signed-out', checkedAt: 0, lastCheckAt: 0,
     hasSession: false, maintenanceQueued: false
   };
@@ -1303,6 +1648,7 @@ async function deleteAccount(id) {
     await targetSession.clearStorageData();
     await targetSession.clearCache();
     await targetSession.cookies.flushStore();
+    removeAccountSessionSnapshot(id);
     dataStore.db.prepare('DELETE FROM service_accounts WHERE id = ?').run(id);
     accounts = accounts.filter(item => item.id !== id);
     emitLog('账号及本地登录信息已删除', { account: account.label });
@@ -1328,8 +1674,24 @@ function recordAccountRequest() {
   publishAccounts();
 }
 
+function markAccountRateLimited(id) {
+  const account = accounts.find(item => item.id === id);
+  if (!account) return;
+  account.cooldownUntil = Date.now() + 60 * 60 * 1000;
+  account.status = 'cooldown';
+  dataStore.db.prepare('UPDATE service_accounts SET cooldown_until = ? WHERE id = ?')
+    .run(account.cooldownUntil, account.id);
+  emitLog('账号进入一小时估值冷却', { account: account.label });
+  publishAccounts();
+}
+
 async function probeAccount(account, budget = 10000, force = false) {
   if (account.deleting || !accounts.includes(account)) return false;
+  if (account.cooldownUntil > Date.now()) {
+    account.status = 'cooldown';
+    publishAccounts();
+    return false;
+  }
   if (account.loginInProgress) return account.status === 'authenticated';
   if (account.checkPromise) return account.checkPromise;
   if (!force) {
@@ -1342,16 +1704,22 @@ async function probeAccount(account, budget = 10000, force = false) {
   const work = async () => {
     let probe;
     account.lastCheckAt = Date.now();
-    account.status = 'checking';
-    publishAccounts();
     const deadline = Date.now() + budget;
     try {
       const cookies = await session.fromPartition(account.partition).cookies.get({ url: 'https://www.che300.com/' });
       if (!isCurrent()) return account.status === 'authenticated';
       account.hasSession = cookies.length > 0;
-      if (!account.hasSession) { account.status = 'signed-out'; account.checkedAt = 0; return false; }
+      if (!account.hasSession) {
+        account.status = 'signed-out';
+        account.checkedAt = 0;
+        publishAccounts();
+        return false;
+      }
+      account.status = 'checking';
+      publishAccounts();
       probe = new BrowserWindow({ show: false, webPreferences: {
-        partition: account.partition, backgroundThrottling: false, contextIsolation: true, nodeIntegration: false, sandbox: true
+        partition: account.partition, backgroundThrottling: false, paintWhenInitiallyHidden: true,
+        contextIsolation: true, nodeIntegration: false, sandbox: true
       } });
       await loadChe300Page(probe, 'https://www.che300.com/pinggu?city=3&_session_check=' + Date.now(), Math.min(12000, budget));
       await waitForPageCondition(probe,
@@ -1359,7 +1727,9 @@ async function probeAccount(account, budget = 10000, force = false) {
       const state = await loginPageState(probe);
       if (!isCurrent()) return account.status === 'authenticated';
       const verified = Boolean(state && new URL(state.url).hostname === 'www.che300.com' && state.hasLogout && !state.hasPhoneInput);
-      account.status = verified ? 'authenticated' : 'expired';
+      account.status = verified
+        ? (account.cooldownUntil > Date.now() ? 'cooldown' : 'authenticated')
+        : 'expired';
       account.checkedAt = verified ? Date.now() : 0;
       return verified;
     } catch (error) {
@@ -1382,10 +1752,6 @@ async function refreshAccount(id) {
   if (account.loginInProgress) return accountSnapshot();
   emitLog('主动验证账号登录态', { account: account.label });
   await probeAccount(account, 12000, true);
-  if (account.status === 'unknown' && !account.loginInProgress) {
-    emitLog('账号验证暂未完成，重试一次', { account: account.label });
-    await probeAccount(account, 12000, true);
-  }
   return accountSnapshot();
 }
 
@@ -1410,7 +1776,7 @@ async function findReadyBackup(excluded = new Set([currentAccountId])) {
   const start = accounts.findIndex(account => account.id === currentAccountId);
   for (let offset = 1; offset <= accounts.length; offset += 1) {
     const candidate = accounts[(start + offset) % accounts.length];
-    if (!candidate || candidate.deleting || excluded.has(candidate.id)) continue;
+    if (!candidate || candidate.deleting || excluded.has(candidate.id) || candidate.cooldownUntil > Date.now()) continue;
     if (Date.now() >= deadline) break;
     if (await probeAccount(candidate, deadline - Date.now())) return candidate;
   }
@@ -1447,9 +1813,16 @@ async function getSessionState() {
   };
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   initializeDataStore();
   initializeAccounts();
+  const sessionRestore = restoreAccountSessions().catch(error => {
+    emitLog('恢复账号登录状态失败', { message: error.message });
+  });
+  await Promise.race([
+    sessionRestore,
+    new Promise(resolve => setTimeout(resolve, 1500))
+  ]);
   selfTest();
   ipcMain.handle('app:logs', () => logHistory);
   ipcMain.handle('catalog:regions', getRegions);
@@ -1468,6 +1841,8 @@ app.whenReady().then(() => {
   ipcMain.on('login-panel:document-state', (event, state) => {
     if (!loginWindow || event.sender !== loginWindow.webContents || event.senderFrame !== event.sender.mainFrame) return;
     loginWindow.updateFormState(state);
+    const phone = String(state?.phone || '').replace(/\D/g, '').slice(0, 11);
+    if (/^1\d{10}$/.test(phone)) loginPhoneMask = phone.slice(0, 3) + '****' + phone.slice(-4);
     const account = accounts.find(item => item.id === currentAccountId);
     if (account?.loginInProgress && !loginAuthenticated) {
       const phase = state?.loginPhase;
@@ -1508,7 +1883,6 @@ app.whenReady().then(() => {
   ipcMain.handle('che300:estimate', (_event, input) => submitEstimate(input));
   ipcMain.on('che300:cancel-estimate', () => quoteRequests.cancel());
   createMainWindow();
-  verifyStartupAccounts().catch(error => emitLog('启动验证失败', { message: error.message }));
   setTimeout(warmCatalog, 250);
   setTimeout(() => scheduleCatalogTask('catalog:warm', () => prepareCatalog('passenger')), 500);
 

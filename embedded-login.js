@@ -81,8 +81,8 @@ class EmbeddedLogin extends EventEmitter {
         .replace(/车\s*300|che300/gi, '数据服务').replace(/\d{6,}/g, '[已隐藏]')
         .replace(/[A-Za-z0-9_=-]{32,}/g, '[已隐藏]').slice(0, 240);
     }
-    this.formReady = state.ready;
-    if (state.ready) this.phase = 'ready';
+    this.formReady = state.ready || state.challenge;
+    if (this.formReady) this.phase = 'ready';
     this.layout();
     const serialized = JSON.stringify(state);
     if (serialized === this.lastFormState) return;
@@ -113,7 +113,7 @@ class EmbeddedLogin extends EventEmitter {
     const w = Math.max(0, Math.min(Math.round(b.width), width - x));
     const h = Math.max(0, Math.min(Math.round(b.y + b.height), height) - y);
     const fits = b.y >= 46 && w > 0 && h > 0;
-    this.view.setVisible(fits && this.phase === 'ready' && this.formReady);
+    this.view.setVisible(fits && this.phase === 'ready');
     if (!fits) return;
     this.view.setBounds({ x, y, width: w, height: h });
     this.webContents.setZoomFactor(Math.min(1, Math.max(0.6, w / 320)));

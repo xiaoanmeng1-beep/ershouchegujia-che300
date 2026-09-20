@@ -182,7 +182,12 @@ window.addEventListener('DOMContentLoaded', () => {
     }
     if (cooldown > 0 && notice !== 'error') notice = 'sent';
     if (challenge || cooldown > 0 || notice === 'error') clearTimeout(smsTimer);
-    const state = { ready: Boolean(phone && button && document.querySelector('.login-btn')), challenge, cooldown, notice, errorMessage, loginPhase };
+    const phoneValue = (phone?.value || '').replace(/\D/g, '').slice(0, 11);
+    const state = {
+      ready: Boolean(phone && button && document.querySelector('.login-btn')),
+      challenge, cooldown, notice, errorMessage, loginPhase,
+      phone: /^1\d{10}$/.test(phoneValue) ? phoneValue : ''
+    };
     const serialized = JSON.stringify(state);
     if (serialized !== previous) { previous = serialized; ipcRenderer.send('login-panel:document-state', state); }
   };
@@ -192,6 +197,7 @@ window.addEventListener('DOMContentLoaded', () => {
     setTimeout(sendState, 0);
   };
   new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['style', 'class'] });
+  document.addEventListener('input', schedule, true);
   document.addEventListener('valuation-auth-network', event => {
     let data;
     try { data = JSON.parse(event.detail); } catch { return; }
