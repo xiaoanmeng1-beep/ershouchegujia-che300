@@ -24,8 +24,14 @@ body {
   font-family: "PingFang SC", "Noto Sans CJK SC", sans-serif;
 }
 
+html {
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+}
+
 body {
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: visible;
 }
 
 button,
@@ -721,6 +727,43 @@ button.form-row {
 .valuation-column { min-width: 0; }
 .account-column { min-width: 0; padding-left: 14px; }
 .valuation-column { padding-right: 14px; }
+.valuation-banner {
+  width: 100%;
+  margin: 0 0 6px;
+  overflow: hidden;
+  border-radius: 6px 6px 0 0;
+  -webkit-app-region: no-drag;
+}
+.valuation-banner-primary {
+  padding: 11px 16px;
+  color: #171717;
+  background: #ffe13b;
+  font-size: clamp(20px, 2.2vw, 28px);
+  font-weight: 800;
+  line-height: 1.25;
+  text-align: center;
+  letter-spacing: 0.02em;
+}
+.valuation-banner-ticker {
+  height: 34px;
+  overflow: hidden;
+  color: #fff;
+  background: #10110e;
+  font-size: 14px;
+  line-height: 34px;
+}
+.valuation-banner-ticker span {
+  display: inline-block;
+  min-width: max-content;
+  padding-left: 100%;
+  white-space: nowrap;
+  animation: valuation-banner-scroll 11s linear infinite;
+  will-change: transform;
+}
+@keyframes valuation-banner-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
 .panel-divider { position: relative; align-self: stretch; min-height: 160px; cursor: col-resize; touch-action: none; -webkit-app-region: no-drag; }
 .panel-divider::before { content: ''; position: absolute; top: 0; bottom: 0; left: 5px; width: 1px; background: var(--line); }
 .panel-divider::after { content: ''; position: absolute; top: 130px; left: 3px; width: 5px; height: 30px; border-radius: 3px; background: #b8bcc2; }
@@ -837,23 +880,34 @@ button.form-row {
   border-top-color: currentColor;
   border-radius: 50%;
   animation: quote-loading 0.8s linear infinite;
+  will-change: transform;
 }
 @keyframes quote-loading { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) {
-  #primaryPrice.is-loading::before { animation: none; }
-}
 .add-account-button { width: 100%; margin: 0 0 14px; }
 .account-list { display: grid; gap: 12px; }
 .account-item {
+  position: relative;
   display: grid;
   gap: 9px;
-  padding: 14px;
+  padding: 14px 42px 14px 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
   font-size: 13px;
 }
 .account-item.current { border-color: #8bbdf0; }
+.account-login-spinner {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 15px;
+  height: 15px;
+  border: 2px solid #d9e8f8;
+  border-top-color: #2587e6;
+  border-radius: 50%;
+  animation: quote-loading 0.8s linear infinite;
+  will-change: transform;
+}
 .account-item-status { color: #737981; }
 .account-item-status.verified { color: #218453; }
 .account-counter { color: #8a8d92; font-size: 12px; }
@@ -868,6 +922,30 @@ button.form-row {
 }
 .account-actions button:disabled, .add-account-button:disabled { opacity: 0.5; cursor: default; }
 .account-policy { color: #8a8d92; font-size: 12px; line-height: 1.6; }
+.banner-copy-editor {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+.banner-copy-editor h3 { margin: 0; font-size: 13px; color: var(--text); }
+.banner-copy-editor label { display: grid; gap: 4px; color: #737981; font-size: 11px; }
+.banner-copy-editor input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--text);
+  background: #fff;
+  font: inherit;
+}
+.banner-copy-editor input:focus { outline: 2px solid #a6cfff; outline-offset: 1px; }
+.banner-copy-editor p { margin: 0; color: #92969c; font-size: 10px; line-height: 1.45; }
 .form-message:empty { display: none; }
 .form-row.quote-row {
   display: grid;
@@ -990,8 +1068,8 @@ button.form-row {
 
 .vehicle-photo-stage {
   position: relative;
-  height: 220px;
-  margin-bottom: 12px;
+  height: clamp(320px, calc(100vh - 420px), 720px);
+  margin-bottom: 0;
   overflow: hidden;
   -webkit-app-region: no-drag;
 }
@@ -1006,7 +1084,60 @@ button.form-row {
   touch-action: none;
   -webkit-user-drag: none;
   -webkit-app-region: no-drag;
+  cursor: grab;
+  transform-origin: center;
 }
 .vehicle-photo-stage img.is-dragging { cursor: grabbing; }
 .vehicle-photo-stage img:focus-visible { outline: 1px dashed #8bbdf0; outline-offset: -1px; }
+.vehicle-photo-card figcaption,
+.vehicle-photo-card > p { display: none; }
+.vehicle-photo-editor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 280px;
+  height: 170px;
+  box-sizing: border-box;
+  border: 1px dashed transparent;
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+  -webkit-app-region: no-drag;
+}
+.vehicle-photo-editor.is-dragging { cursor: grabbing; }
+.vehicle-photo-editor:focus,
+.vehicle-photo-editor:focus-within { border-color: #8bbdf0; }
+.vehicle-photo-editor:focus-visible { outline: 2px solid #8bbdf0; outline-offset: 2px; }
+.vehicle-photo-card .vehicle-photo-stage .vehicle-photo-editor img {
+  position: static;
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  margin: 0;
+  object-fit: contain;
+  pointer-events: none;
+}
+.vehicle-photo-resize-handle {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  box-sizing: border-box;
+  border: 2px solid #2587e6;
+  border-radius: 50%;
+  background: #fff;
+  touch-action: none;
+  z-index: 2;
+  opacity: 0;
+  pointer-events: none;
+}
+.vehicle-photo-editor:focus .vehicle-photo-resize-handle,
+.vehicle-photo-editor:focus-within .vehicle-photo-resize-handle {
+  opacity: 1;
+  pointer-events: auto;
+}
+.vehicle-photo-resize-handle.corner-nw { left: -7px; top: -7px; cursor: nwse-resize; }
+.vehicle-photo-resize-handle.corner-ne { right: -7px; top: -7px; cursor: nesw-resize; }
+.vehicle-photo-resize-handle.corner-sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.vehicle-photo-resize-handle.corner-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
 .account-actions .delete-account-button { color: #b44840; border-color: #ead3d0; background: #fff; }

@@ -16,6 +16,43 @@ const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 const seenLogIds = new Set();
 const $ = (selector) => document.querySelector(selector);
 
+const defaultBannerCopy = {
+  primary: '在线查价  X月份真实收车价',
+  ticker: '所在地丨车型丨配置丨上牌丨公里数'
+};
+let bannerCopy = { ...defaultBannerCopy };
+try {
+  const saved = JSON.parse(localStorage.getItem('valuation-banner-copy'));
+  if (saved && typeof saved.primary === 'string' && typeof saved.ticker === 'string') {
+    bannerCopy = { primary: saved.primary, ticker: saved.ticker };
+  }
+} catch {}
+
+function displayBannerPrimary(text) {
+  return text.replace(/x(?=月份)/gi, String(new Date().getMonth() + 1));
+}
+
+function renderBannerCopy() {
+  $('#valuationBannerPrimary').textContent = displayBannerPrimary(bannerCopy.primary);
+  $('#valuationBannerTicker').textContent = bannerCopy.ticker;
+  $('#bannerPrimaryInput').value = bannerCopy.primary;
+  $('#bannerTickerInput').value = bannerCopy.ticker;
+}
+
+function updateBannerCopy() {
+  bannerCopy = {
+    primary: $('#bannerPrimaryInput').value,
+    ticker: $('#bannerTickerInput').value
+  };
+  try { localStorage.setItem('valuation-banner-copy', JSON.stringify(bannerCopy)); } catch {}
+  $('#valuationBannerPrimary').textContent = displayBannerPrimary(bannerCopy.primary);
+  $('#valuationBannerTicker').textContent = bannerCopy.ticker;
+}
+
+$('#bannerPrimaryInput').addEventListener('input', updateBannerCopy);
+$('#bannerTickerInput').addEventListener('input', updateBannerCopy);
+renderBannerCopy();
+
 const vehicleDialog = $('#vehicleDialog');
 const configurationDialog = $('#configurationDialog');
 const configurationField = $('#configurationField');
@@ -50,9 +87,10 @@ const loginPanel = $('#loginPanel');
 const loginPanelHost = $('#loginPanelHost');
 window.desktop.onLoginFormState(data => {
   if (loginPanel.hidden) return;
-  loginPanelHost.hidden = !data.ready;
+  const canShowLoginContent = data.ready || data.challenge;
+  loginPanelHost.hidden = !canShowLoginContent;
   loginPanelHost.classList.toggle('has-challenge', data.challenge);
-  $('#loginPanelSpinner').hidden = data.ready;
+  $('#loginPanelSpinner').hidden = canShowLoginContent;
   $('#retryLoginPanel').hidden = data.notice !== 'error';
   $('#authNotice').textContent = data.challenge ? '请完成安全验证' :
     data.notice === 'error' ? (data.errorMessage || '发送未完成，请重试') :
@@ -74,9 +112,7 @@ window.desktop.onLoginPanelState(({ phase }) => {
   $('.app-shell').classList.toggle('login-open', !loginPanel.hidden);
   $('#loginPanelSpinner').hidden = phase !== 'loading';
   $('#retryLoginPanel').hidden = phase !== 'failed';
-  if (phase !== 'ready') {
-    loginPanelHost.hidden = true;
-  }
+  loginPanelHost.hidden = phase !== 'ready';
   if (phase === 'closed') {
     $('#authNotice').textContent = '';
     refreshLoginStatus();
@@ -601,22 +637,33 @@ citySelect.addEventListener('change', () => {
 loadRegionSelects();
 renderRegistrationYears();
 
-const movableVehiclePhoto = $('#vehiclePhoto');
+const movableVehiclePhoto = $('#vehiclePhotoEditor');
+const vehiclePhotoImage = $('#vehiclePhoto');
 const vehiclePhotoStage = $('#vehiclePhotoStage');
+const vehiclePhotoResizeHandles = [...document.querySelectorAll('.vehicle-photo-resize-handle')];
 const defaultVehiclePhotoPosition = { x: 0.5, y: 0 };
+const defaultVehiclePhotoScale = 1;
+const minimumVehiclePhotoScale = 0.25;
+const maximumVehiclePhotoScale = 5;
+const vehiclePhotoBaseWidth = 280;
 let vehiclePhotoPosition = { ...defaultVehiclePhotoPosition };
+let vehiclePhotoScale = defaultVehiclePhotoScale;
 let vehiclePhotoDrag = null;
+let vehiclePhotoResize = null;
 try {
   const saved = JSON.parse(localStorage.getItem('vehicle-photo-position'));
   if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
     vehiclePhotoPosition = { x: Math.max(0, Math.min(1, saved.x)), y: Math.max(0, Math.min(1, saved.y)) };
+    if (Number.isFinite(saved.scale)) {
+      vehiclePhotoScale = Math.max(minimumVehiclePhotoScale, Math.min(maximumVehiclePhotoScale, saved.scale));
+    }
   }
 } catch {}
 
 function vehiclePhotoMovementRange() {
   return {
-    x: Math.max(0, vehiclePhotoStage.clientWidth - movableVehiclePhoto.offsetWidth),
-    y: Math.max(0, vehiclePhotoStage.clientHeight - movableVehiclePhoto.offsetHeight)
+    x: vehiclePhotoStage.clientWidth - movableVehiclePhoto.offsetWidth,
+    y: vehiclePhotoStage.clientHeight - movableVehiclePhoto.offsetHeight
   };
 }
 
@@ -628,7 +675,30 @@ function applyVehiclePhotoPosition() {
 }
 
 function saveVehiclePhotoPosition() {
-  try { localStorage.setItem('vehicle-photo-position', JSON.stringify(vehiclePhotoPosition)); } catch {}
+  try {
+    localStorage.setItem('vehicle-photo-position', JSON.stringify({ ...vehiclePhotoPosition, scale: vehiclePhotoScale }));
+  } catch {}
+}
+
+function setVehiclePhotoScale(nextScale, preserveCenter = true) {
+  const oldRange = vehiclePhotoMovementRange();
+  const oldLeft = oldRange.x * vehiclePhotoPosition.x;
+  const oldTop = oldRange.y * vehiclePhotoPosition.y;
+  const oldCenter = {
+    x: oldLeft + movableVehiclePhoto.offsetWidth / 2,
+    y: oldTop + movableVehiclePhoto.offsetHeight / 2
+  };
+  vehiclePhotoScale = Math.max(minimumVehiclePhotoScale, Math.min(maximumVehiclePhotoScale, nextScale));
+  movableVehiclePhoto.style.width = `${vehiclePhotoBaseWidth * vehiclePhotoScale}px`;
+  const ratio = vehiclePhotoImage.naturalWidth ? vehiclePhotoImage.naturalHeight / vehiclePhotoImage.naturalWidth : 170 / 280;
+  movableVehiclePhoto.style.height = `${vehiclePhotoBaseWidth * vehiclePhotoScale * ratio}px`;
+  const range = vehiclePhotoMovementRange();
+  const desiredLeft = preserveCenter ? oldCenter.x - movableVehiclePhoto.offsetWidth / 2 : oldLeft;
+  const desiredTop = preserveCenter ? oldCenter.y - movableVehiclePhoto.offsetHeight / 2 : oldTop;
+  vehiclePhotoPosition.x = range.x ? Math.max(0, Math.min(1, desiredLeft / range.x)) : 0.5;
+  vehiclePhotoPosition.y = range.y ? Math.max(0, Math.min(1, desiredTop / range.y)) : 0.5;
+  applyVehiclePhotoPosition();
+  saveVehiclePhotoPosition();
 }
 
 function finishVehiclePhotoDrag(event) {
@@ -641,7 +711,7 @@ function finishVehiclePhotoDrag(event) {
 
 movableVehiclePhoto.addEventListener('dragstart', event => event.preventDefault());
 movableVehiclePhoto.addEventListener('pointerdown', event => {
-  if (event.button !== 0 || vehiclePhotoDrag) return;
+  if (event.button !== 0 || vehiclePhotoDrag || vehiclePhotoResize || event.target.closest('.vehicle-photo-resize-handle')) return;
   event.preventDefault();
   const range = vehiclePhotoMovementRange();
   vehiclePhotoDrag = {
@@ -657,8 +727,8 @@ movableVehiclePhoto.addEventListener('pointermove', event => {
   const range = vehiclePhotoMovementRange();
   const left = vehiclePhotoDrag.left + event.clientX - vehiclePhotoDrag.clientX;
   const top = vehiclePhotoDrag.top + event.clientY - vehiclePhotoDrag.clientY;
-  if (range.x > 0) vehiclePhotoPosition.x = Math.max(0, Math.min(1, left / range.x));
-  if (range.y > 0) vehiclePhotoPosition.y = Math.max(0, Math.min(1, top / range.y));
+  if (range.x) vehiclePhotoPosition.x = Math.max(0, Math.min(1, left / range.x));
+  if (range.y) vehiclePhotoPosition.y = Math.max(0, Math.min(1, top / range.y));
   applyVehiclePhotoPosition();
 });
 movableVehiclePhoto.addEventListener('pointerup', finishVehiclePhotoDrag);
@@ -666,6 +736,10 @@ movableVehiclePhoto.addEventListener('pointercancel', finishVehiclePhotoDrag);
 movableVehiclePhoto.addEventListener('lostpointercapture', finishVehiclePhotoDrag);
 function resetVehiclePhotoPosition() {
   vehiclePhotoPosition = { ...defaultVehiclePhotoPosition };
+  vehiclePhotoScale = defaultVehiclePhotoScale;
+  movableVehiclePhoto.style.width = `${vehiclePhotoBaseWidth}px`;
+  const ratio = vehiclePhotoImage.naturalWidth ? vehiclePhotoImage.naturalHeight / vehiclePhotoImage.naturalWidth : 170 / 280;
+  movableVehiclePhoto.style.height = `${vehiclePhotoBaseWidth * ratio}px`;
   applyVehiclePhotoPosition();
   saveVehiclePhotoPosition();
 }
@@ -678,16 +752,73 @@ movableVehiclePhoto.addEventListener('keydown', event => {
   const axis = event.key === 'ArrowLeft' || event.key === 'ArrowRight' ? 'x' : 'y';
   if (!range[axis]) return;
   const direction = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
-  vehiclePhotoPosition[axis] = Math.max(0, Math.min(1, vehiclePhotoPosition[axis] + direction * (event.shiftKey ? 10 : 2) / range[axis]));
+  const nextPixels = range[axis] * vehiclePhotoPosition[axis] + direction * (event.shiftKey ? 10 : 2);
+  vehiclePhotoPosition[axis] = Math.max(0, Math.min(1, nextPixels / range[axis]));
   applyVehiclePhotoPosition();
   saveVehiclePhotoPosition();
+});
+vehiclePhotoResizeHandles.forEach(handle => {
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || vehiclePhotoResize) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const range = vehiclePhotoMovementRange();
+    vehiclePhotoResize = {
+      handle,
+      corner: handle.dataset.corner,
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      width: movableVehiclePhoto.offsetWidth,
+      height: movableVehiclePhoto.offsetHeight,
+      left: range.x * vehiclePhotoPosition.x,
+      top: range.y * vehiclePhotoPosition.y
+    };
+    handle.setPointerCapture(event.pointerId);
+    movableVehiclePhoto.focus({ preventScroll: true });
+  });
+  handle.addEventListener('pointermove', event => {
+    if (!vehiclePhotoResize || vehiclePhotoResize.handle !== handle || vehiclePhotoResize.pointerId !== event.pointerId) return;
+    const horizontalSign = vehiclePhotoResize.corner.includes('e') ? 1 : -1;
+    const verticalSign = vehiclePhotoResize.corner.includes('s') ? 1 : -1;
+    const aspect = vehiclePhotoResize.width / vehiclePhotoResize.height;
+    const dx = (event.clientX - vehiclePhotoResize.clientX) * horizontalSign;
+    const dyAsWidth = (event.clientY - vehiclePhotoResize.clientY) * verticalSign * aspect;
+    const targetWidth = vehiclePhotoResize.width + (Math.abs(dx) >= Math.abs(dyAsWidth) ? dx : dyAsWidth);
+    vehiclePhotoScale = Math.max(minimumVehiclePhotoScale, Math.min(maximumVehiclePhotoScale, targetWidth / vehiclePhotoBaseWidth));
+    const nextWidth = vehiclePhotoBaseWidth * vehiclePhotoScale;
+    const nextHeight = nextWidth / aspect;
+    movableVehiclePhoto.style.width = `${nextWidth}px`;
+    movableVehiclePhoto.style.height = `${nextHeight}px`;
+    const desiredLeft = vehiclePhotoResize.corner.includes('w')
+      ? vehiclePhotoResize.left + vehiclePhotoResize.width - nextWidth : vehiclePhotoResize.left;
+    const desiredTop = vehiclePhotoResize.corner.includes('n')
+      ? vehiclePhotoResize.top + vehiclePhotoResize.height - nextHeight : vehiclePhotoResize.top;
+    const range = vehiclePhotoMovementRange();
+    vehiclePhotoPosition.x = range.x ? Math.max(0, Math.min(1, desiredLeft / range.x)) : 0.5;
+    vehiclePhotoPosition.y = range.y ? Math.max(0, Math.min(1, desiredTop / range.y)) : 0.5;
+    applyVehiclePhotoPosition();
+  });
+});
+function finishVehiclePhotoResize(event) {
+  if (!vehiclePhotoResize || vehiclePhotoResize.pointerId !== event.pointerId) return;
+  const handle = vehiclePhotoResize.handle;
+  vehiclePhotoResize = null;
+  if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+  saveVehiclePhotoPosition();
+}
+vehiclePhotoResizeHandles.forEach(handle => {
+  handle.addEventListener('pointerup', finishVehiclePhotoResize);
+  handle.addEventListener('pointercancel', finishVehiclePhotoResize);
+  handle.addEventListener('lostpointercapture', finishVehiclePhotoResize);
 });
 new ResizeObserver(applyVehiclePhotoPosition).observe(vehiclePhotoStage);
 
 function fitVehiclePhoto() {
-  const photo = $('#vehiclePhoto');
+  const photo = vehiclePhotoImage;
   if (!photo.naturalWidth) return;
-  photo.style.width = '280px';
+  movableVehiclePhoto.style.width = `${vehiclePhotoBaseWidth * vehiclePhotoScale}px`;
+  movableVehiclePhoto.style.height = `${vehiclePhotoBaseWidth * vehiclePhotoScale * photo.naturalHeight / photo.naturalWidth}px`;
   applyVehiclePhotoPosition();
 }
 $('#vehiclePhoto').addEventListener('load', fitVehiclePhoto);
@@ -698,12 +829,14 @@ window.desktop.onVehiclePhotoUpdated(({ inputKey, previousImageUrl, vehicle }) =
   photo.dataset.imageUrl = vehicle.imageUrl;
   photo.src = vehicle.imageData;
   photo.hidden = false;
+  movableVehiclePhoto.hidden = false;
   $('#vehiclePhotoCard').hidden = false;
   $('#vehiclePhotoNote').textContent = '车型参考图，非实车照片';
   if (lastSuccessfulQuote?.key === inputKey) lastSuccessfulQuote.result.vehicle = vehicle;
 });
 $('#vehiclePhoto').addEventListener('error', () => {
   $('#vehiclePhoto').hidden = true;
+  movableVehiclePhoto.hidden = true;
   $('#vehiclePhotoNote').textContent = '车型参考图片暂时无法加载，不影响报价';
 });
 
@@ -721,30 +854,36 @@ async function refreshLoginStatus() {
 
 window.desktop.onAuthState(({ phase }) => {
   if (phase === 'login-required') formMessage.textContent = '';
-  if (estimateRunning && phase === 'login-required') setPriceLoading(true);
-  if (estimateRunning && phase === 'querying') setPriceLoading(true);
+  if (estimateRunning && !hasDisplayedPriceForCurrentEstimate() && phase === 'login-required') setPriceLoading(true);
+  if (estimateRunning && !hasDisplayedPriceForCurrentEstimate() && phase === 'querying') setPriceLoading(true);
 });
 
 function showPrices(result) {
   setPriceLoading(false);
+  const purchaseLow = result?.prices?.good?.low;
+  const purchaseHigh = result?.prices?.good?.high;
+  if (!Number.isFinite(purchaseLow) || !Number.isFinite(purchaseHigh)) {
+    clearPrices('');
+    appendLocalLog('忽略结构不完整的旧报价缓存');
+    return false;
+  }
   const vehicle = result.vehicle || {};
   const imageSource = vehicle.imageData || vehicle.imageUrl;
   $('#vehiclePhoto').dataset.imageUrl = vehicle.imageUrl || '';
   $('#vehiclePhotoCard').hidden = !imageSource;
   if (imageSource) {
     $('#vehiclePhoto').hidden = false;
+    movableVehiclePhoto.hidden = false;
     $('#vehiclePhoto').alt = vehicle.name || '车型参考图片';
     $('#vehiclePhoto').style.width = '';
     $('#vehiclePhoto').src = imageSource;
     $('#vehiclePhotoTitle').textContent = vehicle.name || '车型参考图片';
     $('#vehiclePhotoNote').textContent = '车型参考图，非实车照片';
   }
-  const purchasePrices = [result.prices.excellent.low, result.prices.good.low, result.prices.normal.low];
-  const purchaseLow = Math.min(...purchasePrices);
-  const purchaseHigh = Math.max(...purchasePrices);
   $('#primaryPrice').textContent = purchaseLow.toFixed(2) + '万 ～ ' + purchaseHigh.toFixed(2) + ' 万';
   $('#resultBody').textContent = '';
   resultCard.hidden = false;
+  return true;
 }
 
 function currentEstimateInput() {
@@ -769,11 +908,16 @@ function currentEstimateKey() {
   return input ? JSON.stringify(input) : '';
 }
 
+function hasDisplayedPriceForCurrentEstimate() {
+  const key = currentEstimateKey();
+  return Boolean(key && lastSuccessfulQuote?.key === key && !resultCard.hidden);
+}
+
 function scheduleEstimate(delay = 120) {
   clearTimeout(estimateTimer);
   const key = currentEstimateKey();
   if (key && key === pendingEstimateKey && estimateRunning) {
-    setPriceLoading(true);
+    if (!hasDisplayedPriceForCurrentEstimate()) setPriceLoading(true);
     return;
   }
   if (key && key === lastSubmittedKey && !estimateRunning && lastSuccessfulQuote?.key === key) {
@@ -823,7 +967,7 @@ async function runAutomaticEstimate() {
     showPrices(displayedResult);
     formMessage.textContent = '';
     await refreshLoginStatus();
-    appendLocalLog('估值完成，结果来源：' + (result.cached ? '本地缓存' : '车300实时页面'));
+    appendLocalLog('估值完成，结果来源：' + (result.cached ? '本地缓存' : '实时数据'));
   } catch (error) {
     if (revision !== estimateRevision || currentEstimateKey() !== key) return;
     lastSubmittedKey = key;
@@ -868,13 +1012,23 @@ function renderAccounts(accounts) {
   const statuses = {
     authenticated: '登录已确认', unchecked: '正在验证登录', 'signed-out': '未登录',
     checking: '检查中', expired: '登录已失效', 'login-required': '等待登录',
-    cancelled: '登录未完成', unknown: '暂时无法确认', authenticating: '登录中', syncing: '同步登录状态', deleting: '删除中'
+    cancelled: '登录未完成', unknown: '暂时无法确认', authenticating: '登录中', syncing: '同步登录状态',
+    cooldown: '估值冷却中', deleting: '删除中'
   };
   accounts.forEach(account => {
     const card = document.createElement('section');
     card.className = 'account-item' + (account.active ? ' current' : '');
+    const loginBusy = Boolean(account.loginInProgress || ['authenticating', 'syncing'].includes(account.status));
+    if (loginBusy) {
+      const spinner = document.createElement('span');
+      spinner.className = 'account-login-spinner';
+      spinner.setAttribute('role', 'status');
+      spinner.setAttribute('aria-label', account.label + '正在登录');
+      card.append(spinner);
+    }
     const heading = document.createElement('strong');
-    heading.textContent = account.label + (account.active ? ' · 当前使用' : '');
+    heading.textContent = account.label + (account.phoneMask ? ' · ' + account.phoneMask : '')
+      + (account.active ? ' · 当前使用' : '');
     const status = document.createElement('span');
     status.className = 'account-item-status' + (account.status === 'authenticated' ? ' verified' : '');
     status.textContent = statuses[account.status] || '待验证';

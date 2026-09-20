@@ -11,6 +11,10 @@
 
   <main class="app-shell">
     <div class="valuation-column">
+    <section class="valuation-banner" aria-label="查价公屏">
+      <div class="valuation-banner-primary" id="valuationBannerPrimary"></div>
+      <div class="valuation-banner-ticker"><span id="valuationBannerTicker"></span></div>
+    </section>
     <section class="form-panel" aria-label="车辆信息">
       <button class="form-row" id="vehicleField" type="button">
         <span class="row-label">车型</span>
@@ -25,7 +29,7 @@
       </button>
 
       <div class="form-row split-row" id="registrationField">
-        <span class="row-label">选择年份</span>
+        <span class="row-label">哪年上牌</span>
         <span class="split-controls date-controls">
           <label class="date-control"><select id="registrationYearSelect" aria-label="上牌年份" disabled><option value="">年份</option></select><span>年</span></label>
           <label class="date-control"><select id="registrationMonthSelect" aria-label="上牌月份" disabled><option value="">月份</option></select><span>月</span></label>
@@ -41,14 +45,14 @@
       </div>
 
       <label class="form-row" for="mileageInput">
-        <span class="row-label">输入公里数</span>
+        <span class="row-label">多少公里</span>
         <span class="mileage-control">
           <input class="row-input mileage-input" id="mileageInput" type="number" min="0" step="0.1" inputmode="decimal" placeholder="公里数" aria-label="输入行驶里程（万公里）">
           <span class="unit">万公里</span>
         </span>
       </label>
       <section class="form-row quote-summary quote-row" id="resultCard" aria-live="polite">
-        <span class="row-label">收车价区间</span>
+        <span class="row-label">收车参考价</span>
         <strong id="primaryPrice">--</strong>
       </section>
     </section>
@@ -58,7 +62,13 @@
 
     <figure class="vehicle-photo-card" id="vehiclePhotoCard" hidden>
       <div class="vehicle-photo-stage" id="vehiclePhotoStage">
-        <img id="vehiclePhoto" alt="车型参考图片" referrerpolicy="no-referrer" draggable="false" tabindex="0" title="拖动调整位置，双击恢复默认；方向键微调，Home 键复位">
+        <div class="vehicle-photo-editor" id="vehiclePhotoEditor" tabindex="0" title="拖动图片调整位置，拖动任意一个角调整大小，双击恢复默认">
+          <img id="vehiclePhoto" alt="车型参考图片" referrerpolicy="no-referrer" draggable="false">
+          <span class="vehicle-photo-resize-handle corner-nw" data-corner="nw" aria-label="拖动左上角调整图片大小"></span>
+          <span class="vehicle-photo-resize-handle corner-ne" data-corner="ne" aria-label="拖动右上角调整图片大小"></span>
+          <span class="vehicle-photo-resize-handle corner-sw" data-corner="sw" aria-label="拖动左下角调整图片大小"></span>
+          <span class="vehicle-photo-resize-handle corner-se" data-corner="se" aria-label="拖动右下角调整图片大小"></span>
+        </div>
       </div>
       <figcaption id="vehiclePhotoTitle"></figcaption>
       <p id="vehiclePhotoNote">车型参考图，非实车照片</p>
@@ -82,6 +92,12 @@
       </section>
       <div class="account-list" id="accountList" aria-label="账号列表"></div>
       <p class="account-policy">账号独立登录，失效时自动尝试可用备用账号。</p>
+    <section class="banner-copy-editor" aria-label="公屏文案设置">
+      <h3>公屏文案</h3>
+      <label>黄色主标题<input id="bannerPrimaryInput" type="text" maxlength="80"></label>
+      <label>滚动字幕<input id="bannerTickerInput" type="text" maxlength="120"></label>
+      <p>主标题中的 X月份会自动显示电脑当前月份。</p>
+    </section>
     <details class="diagnostics">
     <summary>运行日志</summary>
     <section class="log-panel">
